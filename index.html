@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Крестики-нолики</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{
+  --bg:var(--tg-theme-bg-color,#fff);
+  --text:var(--tg-theme-text-color,#000);
+  --hint:var(--tg-theme-hint-color,#707579);
+  --cell:var(--tg-theme-secondary-bg-color,#f1f1f4);
+  --x:var(--tg-theme-link-color,#3390ec);
+  --o:var(--tg-theme-destructive-text-color,#e53935);
+  --btn:var(--tg-theme-button-color,#3390ec);
+  --btn-text:var(--tg-theme-button-text-color,#fff);
+}
+*{box-sizing:border-box;margin:0;-webkit-tap-highlight-color:transparent}
+html,body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:16px;padding-top:max(16px,var(--tg-content-safe-area-inset-top,0px));user-select:none}
+.wrap{width:100%;max-width:380px;display:flex;flex-direction:column;gap:16px}
+.score{display:grid;grid-template-columns:repeat(3,1fr);text-align:center;background:var(--cell);border-radius:14px;padding:10px 0}
+.score b{display:block;font-size:24px;font-variant-numeric:tabular-nums}
+.score span{font-size:12px;color:var(--hint)}
+.seg{display:grid;grid-template-columns:repeat(3,1fr);background:var(--cell);border-radius:10px;padding:3px}
+.seg button{border:0;background:none;color:var(--text);padding:7px 0;border-radius:8px;font-family:inherit;font-size:14px;font-weight:500;cursor:pointer}
+.seg button.on{background:var(--bg);box-shadow:0 1px 3px rgba(0,0,0,.15);font-weight:600}
+#status{text-align:center;font-size:18px;font-weight:600;min-height:24px}
+#board{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.c{aspect-ratio:1;border:0;border-radius:16px;background:var(--cell);padding:16%;cursor:pointer;transition:transform .1s,background .25s}
+.c:active{transform:scale(.94)}
+.c.win{background:var(--btn)}
+.c.win svg{stroke:var(--btn-text)}
+svg{width:100%;height:100%;fill:none;stroke-width:12;stroke-linecap:round;display:block}
+svg.x{stroke:var(--x)}svg.o{stroke:var(--o)}
+svg path,svg circle{stroke-dasharray:200;stroke-dashoffset:200;animation:draw .3s ease-out forwards}
+svg path+path{animation-delay:.12s}
+@keyframes draw{to{stroke-dashoffset:0}}
+#again{border:0;border-radius:12px;padding:14px;font-family:inherit;font-size:16px;font-weight:600;background:var(--btn);color:var(--btn-text);cursor:pointer;visibility:hidden}
+#again.show{visibility:visible}
+.thinking{opacity:.6}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="score">
+    <div><b id="sw">0</b><span>Ты</span></div>
+    <div><b id="sd">0</b><span>Ничьи</span></div>
+    <div><b id="sl">0</b><span>Бот</span></div>
+  </div>
+  <div class="seg" id="level">
+    <button data-l="easy">Легко</button>
+    <button data-l="normal">Средне</button>
+    <button data-l="hard">Сложно</button>
+  </div>
+  <div id="status"></div>
+  <div id="board"></div>
+  <button id="again">Новая игра</button>
+</div>
+<script src="game.js"></script>
+<script>
+const tg = window.Telegram?.WebApp;
+const haptic = (kind, v) => { try { tg?.HapticFeedback?.[kind]?.(v); } catch (e) {} };
+const X = '<svg viewBox="0 0 100 100" class="x"><path d="M22 22L78 78"/><path d="M78 22L22 78"/></svg>';
+const O = '<svg viewBox="0 0 100 100" class="o"><circle cx="50" cy="50" r="31"/></svg>';
+const $ = (id) => document.getElementById(id);
+
+let stats = { w: 0, l: 0, d: 0, level: 'normal', games: 0 };
+let board, over, locked;
+
+// --- Хранение счёта: облако Telegram (CloudStorage), вне Telegram — localStorage ---
+function loadStats(cb) {
+  const apply = (s) => { try { Object.assign(stats, JSON.parse(s) || {}); } catch (e) {} cb(); };
+  if (tg?.CloudStorage && tg.isVersionAtLeast?.('6.9')) {
+    tg.CloudStorage.getItem('stats', (err, v) => apply(err ? null : v));
+  } else {
+    let v = null; try { v = localStorage.getItem('ttt-stats'); } catch (e) {}
+    apply(v);
+  }
+}
+function saveStats() {
+  const s = JSON.stringify(stats);
+  if (tg?.CloudStorage && tg.isVersionAtLeast?.('6.9')) tg.CloudStorage.setItem('stats', s);
+  else try { localStorage.setItem('ttt-stats', s); } catch (e) {}
+}
+
+// --- Отрисовка ---
+const cells = [];
+for (let i = 0; i < 9; i++) {
+  const c = document.createElement('button');
+  c.className = 'c';
+  c.onclick = () => play(i);
+  $('board').appendChild(c);
+  cells.push(c);
+}
+$('level').onclick = (e) => {
+  const l = e.target.dataset?.l;
+  if (!l || l === stats.level) return;
+  stats.level = l; saveStats(); haptic('selectionChanged'); renderLevel(); newGame();
+};
+$('again').onclick = () => { haptic('impactOccurred', 'light'); newGame(); };
+
+function renderLevel() {
+  for (const b of $('level').children) b.classList.toggle('on', b.dataset.l === stats.level);
+}
+function renderScore() { $('sw').textContent = stats.w; $('sl').textContent = stats.l; $('sd').textContent = stats.d; }
+function put(i, who) {
+  board[i] = who;
+  cells[i].innerHTML = who === 'X' ? X : O;
+}
+function status(t) { $('status').textContent = t; }
+
+// --- Игра ---
+function newGame() {
+  board = Array(9).fill(null); over = false; locked = false;
+  for (const c of cells) { c.innerHTML = ''; c.classList.remove('win'); }
+  $('again').classList.remove('show');
+  // ходим по очереди: в нечётных партиях первым ходит игрок, в чётных — бот
+  if (stats.games % 2 === 1) botTurn(); else status('Твой ход — ты ✕');
+}
+
+function play(i) {
+  if (over || locked || board[i]) return;
+  haptic('impactOccurred', 'light');
+  put(i, 'X');
+  if (!checkEnd()) botTurn();
+}
+
+function botTurn() {
+  locked = true; status('Бот думает…'); $('board').classList.add('thinking');
+  setTimeout(() => {
+    $('board').classList.remove('thinking');
+    put(botMove(board, stats.level), 'O');
+    locked = false;
+    if (!checkEnd()) status('Твой ход — ты ✕');
+  }, 350 + Math.random() * 300);
+}
+
+function checkEnd() {
+  const w = winner(board);
+  const draw = !w && board.every(Boolean);
+  if (!w && !draw) return false;
+  over = true; stats.games++;
+  if (w) {
+    w.line.forEach((i) => cells[i].classList.add('win'));
+    if (w.who === 'X') { stats.w++; status('Победа! 🎉'); haptic('notificationOccurred', 'success'); }
+    else { stats.l++; status('Бот выиграл'); haptic('notificationOccurred', 'error'); }
+  } else { stats.d++; status('Ничья'); haptic('notificationOccurred', 'warning'); }
+  saveStats(); renderScore();
+  $('again').classList.add('show');
+  return true;
+}
+
+tg?.ready(); tg?.expand();
+loadStats(() => { renderLevel(); renderScore(); newGame(); });
+</script>
+</body>
+</html>
